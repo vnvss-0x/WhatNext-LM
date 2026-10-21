@@ -36,10 +36,11 @@ def get_all_models():
     return tri, bi, uni, kn, interp
 
 
-tri, bi, uni, kn_model, interp_model = get_all_models()
+with st.spinner("Building language models from TinyStories corpus …"):
+    tri, bi, uni, kn_model, interp_model = get_all_models()
 
 # ------------------------------------------------------------------ input
-text  = st.text_input("Type the beginning of a sentence:", "the happy girls")
+text  = st.text_input("Type the beginning of a sentence:", "once upon a time")
 words = text.lower().replace(".", " . ").split()
 unknown = [w for w in words if w not in uni.vocab]
 
@@ -72,7 +73,6 @@ for col, (w, p) in zip(cols, suggestions):
 
 st.divider()
 st.caption(
-    "Probabilities are model estimates on a small synthetic corpus — not real-world typing statistics. "
+    "Probabilities are model estimates on the streamed TinyStories corpus — not real-world typing statistics. "
     "Kneser-Ney typically achieves lower perplexity than add-k smoothing on held-out data."
 )
-
