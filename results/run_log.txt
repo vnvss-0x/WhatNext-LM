@@ -1,0 +1,26 @@
+Split BY DOCUMENT (fixed): train = 960 sentences / 8098 tokens, test = 240 sentences / 2070 tokens
+
+model                               perplexity   zero-prob tokens   top-3 accuracy
+unigram (k=1)                            24.96            0.0%            48.0%
+bigram (k=1)                              6.43            0.0%            60.9%
+trigram (k=1)                             8.30            0.0%            64.1%
+trigram (k=0.1)                           5.06            0.0%            64.1%
+trigram unsmoothed (k=0)                   inf            4.6%            64.1%
+interpolated 3/2/1-gram (k=0.1)           5.15            0.0%            64.7%
+
+Hard back-off (3->2->1-gram, k=0.1) top-3 accuracy: 64.2%
+
+Perplexity vs k:
+  2-gram: k=0.001: 5.11, k=0.01: 5.08, k=0.1: 5.20, k=0.5: 5.79, k=1: 6.43, k=2: 7.48, k=5: 9.80
+  3-gram: k=0.001: 4.96, k=0.01: 4.63, k=0.1: 5.06, k=0.5: 6.79, k=1: 8.30, k=2: 10.57, k=5: 15.07
+
+Trigram (k=0.1) top-3 misses (context -> true word | suggestions):
+  'the' -> 'foxes' | ['doctors', 'teachers', 'girls']
+  'the foxes eat the' -> 'cakes' | ['bread', 'apples', 'soup']
+  'the' -> 'boys' | ['doctors', 'teachers', 'girls']
+  'the boys' -> 'sell' | ['watch', 'buy', 'bring']
+
+Test positions whose trigram context never appears in training: 9
+  examples: ['brave foxes', 'brave girls', 'happy bread', 'hungry key', 'lazy soup']
+
+Saved results/metrics.json, results/failures.txt, results/ngram_results.png

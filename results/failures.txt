@@ -1,0 +1,10 @@
+Trigram (k=0.1) top-3 misses (context -> true word | suggestions):
+  'the' -> 'foxes' | ['doctors', 'teachers', 'girls']
+  'the foxes eat the' -> 'cakes' | ['bread', 'apples', 'soup']
+  'the' -> 'boys' | ['doctors', 'teachers', 'girls']
+  'the boys' -> 'sell' | ['watch', 'buy', 'bring']
+  'the' -> 'young' | ['doctors', 'teachers', 'girls']
+  'the young dogs play in the' -> 'kitchen' | ['park', 'garden', 'school']
+
+Test positions whose trigram context never appears in training: 9
+  examples: ['brave foxes', 'brave girls', 'happy bread', 'hungry key', 'lazy soup']
