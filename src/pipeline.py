@@ -1,6 +1,13 @@
-"""Lab 02 - Smart Keyboard V1: n-gram language model with add-k smoothing (no UI code here).
+"""Lab 02 - Smart Keyboard V1: n-gram language models (no UI code here).
 
-P(w_i | w_{i-n+1} ... w_{i-1}) = (count(context + w) + k) / (count(context) + k * V)
+Models implemented
+------------------
+NGramModel         – add-k (Laplace-style) smoothing
+                     P(w|ctx) = (C(ctx,w) + k) / (C(ctx) + k*V)
+InterpolatedModel  – linear interpolation of tri/bi/unigram add-k models
+KneserNeyModel     – interpolated Kneser-Ney smoothing (Chen & Goodman 1999)
+                     Uses continuation counts at lower orders and an
+                     auto-estimated absolute discount d = n1/(n1+2*n2).
 """
 import csv
 import math
@@ -122,6 +129,155 @@ class InterpolatedModel:
         return math.exp(-log_sum / n_tok), 0.0
 
 
+# ----------------------------------------------------------------- Kneser-Ney
+class KneserNeyModel:
+    """Interpolated Kneser-Ney language model (Chen & Goodman 1999).
+
+    For the top-order n  (raw counts):
+        P_KN(w | ctx) = max(C(ctx,w) - d, 0) / C(ctx)  +  λ(ctx) · P_KN(w | ctx[1:])
+
+    For intermediate orders  1 < m < n  (continuation counts):
+        P_KN(w | ctx) = max(C_cont(ctx,w) - d, 0) / ΣC_cont(ctx,·)  +  λ(ctx) · P_KN(w | ctx[1:])
+
+    For the unigram level  (m = 1):
+        P_KN(w) = C_cont(w) / Σ_w' C_cont(w')
+        where C_cont(w) = |{v : bigram (v, w) seen in training}|
+
+    The discount d is estimated automatically:
+        d = n1 / (n1 + 2·n2),  n1 = # top-order n-grams with count 1,
+                                n2 = # top-order n-grams with count 2.
+    Supply d explicitly to override (e.g. KneserNeyModel(sents, n=3, d=0.75)).
+    """
+
+    def __init__(self, sentences, n=3, d=None):
+        if n < 2:
+            raise ValueError("KneserNeyModel requires n >= 2 (use NGramModel for unigrams).")
+        self.n = n
+        self.vocab = {w for s in sentences for w in s} | {EOS, UNK}
+        self.V = len(self.vocab)
+
+        # ---- Step 1: raw n-gram counts for every order 1 … n
+        # raw[order] = { ctx_tuple (len order-1) : Counter(next_word) }
+        raw = {}
+        for order in range(1, n + 1):
+            raw[order] = defaultdict(Counter)
+            for s in sentences:
+                padded = [BOS] * (order - 1) + s + [EOS]
+                for i in range(order - 1, len(padded)):
+                    ctx = tuple(padded[i - order + 1: i])
+                    raw[order][ctx][padded[i]] += 1
+
+        # ---- Step 2: top-order uses actual counts
+        self.top_counts = raw[n]          # {ctx (len n-1) : Counter}
+        self.top_totals = {ctx: sum(c.values()) for ctx, c in self.top_counts.items()}
+        self.top_unique  = {ctx: len(c)           for ctx, c in self.top_counts.items()}
+
+        # ---- Step 3: continuation counts for orders 1 … n-1
+        #
+        # cont[m][ctx_m][w]  =  |{ v : (v,) + ctx_m + (w,) seen as an (m+1)-gram }|
+        # where ctx_m has length m-1.
+        #
+        # Built from raw[m+1]: each entry raw[m+1][ctx_m1][w] has ctx_m1 of length m.
+        #   left    = ctx_m1[0]    – the incoming word we are counting unique values of
+        #   right_ctx = ctx_m1[1:] – the context for this order (length m-1)
+        self.cont        = {}   # m -> defaultdict(Counter)
+        self.cont_totals = {}   # m -> {ctx : int}
+        self.cont_unique = {}   # m -> {ctx : int}  (used to compute λ)
+
+        for m in range(1, n):
+            self.cont[m] = defaultdict(Counter)
+            for ctx_m1, word_cnt in raw[m + 1].items():
+                right_ctx = ctx_m1[1:]          # strip the leftmost word
+                for w in word_cnt:              # only unique left contexts count
+                    self.cont[m][right_ctx][w] += 1
+            self.cont_totals[m] = {ctx: sum(c.values()) for ctx, c in self.cont[m].items()}
+            self.cont_unique[m]  = {ctx: len(c)           for ctx, c in self.cont[m].items()}
+
+        # ---- Step 4: estimate discount d from top-order singleton/doubleton counts
+        if d is None:
+            all_top = [c for cc in self.top_counts.values() for c in cc.values()]
+            n1 = sum(1 for c in all_top if c == 1)
+            n2 = sum(1 for c in all_top if c == 2)
+            self.d = n1 / (n1 + 2 * n2) if n2 > 0 else 0.75
+        else:
+            self.d = float(d)
+
+    # ---------------------------------------------------------------- helpers
+    def clean(self, words):
+        """Map OOV words to <unk>."""
+        return [w if w in self.vocab else UNK for w in words]
+
+    def context(self, words):
+        words = [BOS] * (self.n - 1) + self.clean(words)
+        return tuple(words[-(self.n - 1):])
+
+    # ---------------------------------------------------------------- core
+    def _prob(self, order, ctx, word):
+        """Recursively compute interpolated KN probability for 'word' given 'ctx'."""
+        if order == 1:
+            # Unigram level: pure continuation probability
+            total = self.cont_totals.get(1, {}).get((), 0)
+            count = self.cont.get(1, {}).get((), Counter()).get(word, 0)
+            return (count / total) if total > 0 else (1.0 / self.V)
+
+        d = self.d
+        if order == self.n:
+            # Top order: raw counts
+            count  = self.top_counts.get(ctx, Counter()).get(word, 0)
+            total  = self.top_totals.get(ctx, 0)
+            unique = self.top_unique.get(ctx, 0)
+        else:
+            # Intermediate order: continuation counts
+            count  = self.cont[order].get(ctx, Counter()).get(word, 0)
+            total  = self.cont_totals[order].get(ctx, 0)
+            unique = self.cont_unique[order].get(ctx, 0)
+
+        if total == 0:
+            # Context never seen: delegate entirely to lower order
+            return self._prob(order - 1, ctx[1:], word)
+
+        lam   = (d * unique) / total          # probability mass for back-off
+        lower = self._prob(order - 1, ctx[1:], word)
+        return max(count - d, 0.0) / total + lam * lower
+
+    def prob(self, ctx, word):
+        """P_KN(word | ctx)  –  ctx is the last n-1 words as a tuple."""
+        return self._prob(self.n, ctx, word)
+
+    # ---------------------------------------------------------------- prediction
+    def next_word_distribution(self, words):
+        ctx = self.context(words)
+        return {w: self.prob(ctx, w) for w in self.vocab if w != UNK}
+
+    def top_k(self, words, k=3):
+        dist = self.next_word_distribution(words)
+        return sorted(dist.items(), key=lambda x: (-x[1], x[0]))[:k]
+
+    def seen_context(self, words):
+        return self.context(words) in self.top_counts
+
+    # ---------------------------------------------------------------- evaluation
+    def perplexity(self, sentences):
+        """exp(-mean log P) over all tokens (EOS included).
+        Returns (perplexity, share_of_zero_probability_tokens).
+        KN with n >= 2 should never produce zero probabilities."""
+        log_sum, n_tok, zeros = 0.0, 0, 0
+        for s in sentences:
+            words  = self.clean(s)
+            padded = [BOS] * (self.n - 1) + words + [EOS]
+            for i in range(self.n - 1, len(padded)):
+                ctx = tuple(padded[i - self.n + 1: i])
+                p   = self.prob(ctx, padded[i])
+                n_tok += 1
+                if p <= 0:
+                    zeros += 1
+                else:
+                    log_sum += math.log(p)
+        if zeros:
+            return float("inf"), zeros / n_tok
+        return math.exp(-log_sum / n_tok), 0.0
+
+
 def backoff_top_k(tri, bi, uni, words, k=3):
     """Hard back-off for suggestions: use the highest order whose context was actually seen."""
     for model in (tri, bi, uni):
@@ -149,6 +305,14 @@ def top_k_accuracy(model, sentences, k=3):
 if __name__ == "__main__":
     docs = load_documents()
     train, test = split_by_document(docs)
-    m = NGramModel(train, n=3, k=0.1)
-    print("after 'the girls':", m.top_k(["the", "girls"]))
-    print("test perplexity  :", round(m.perplexity(test)[0], 2))
+
+    m_addk = NGramModel(train, n=3, k=0.1)
+    m_kn   = KneserNeyModel(train, n=3)
+
+    print("=== after 'the girls' ===")
+    print(f"  add-k  (k=0.1) : {m_addk.top_k(['the', 'girls'])}")
+    print(f"  Kneser-Ney (d={m_kn.d:.3f}) : {m_kn.top_k(['the', 'girls'])}")
+
+    print("\n=== test perplexity ===")
+    print(f"  add-k  : {m_addk.perplexity(test)[0]:.2f}")
+    print(f"  KN     : {m_kn.perplexity(test)[0]:.2f}")
